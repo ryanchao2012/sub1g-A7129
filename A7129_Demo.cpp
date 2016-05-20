@@ -7,21 +7,22 @@ Uint16 RxCnt;
 /*********************************************************************
 ** constructor
 *********************************************************************/
-A7129::A7129(uint8_t _scs, uint8_t _sck, uint8_t _sdio, uint8_t _cko, uint8_t _gio1, uint8_t _gio2) {
-	init(_scs, _sck, _sdio, _cko, _gio1, _gio2);
+A7129::A7129(uint8_t _scs, uint8_t _sck, uint8_t _sdio, uint8_t _cko, uint8_t _gio1, uint8_t _gio2, uint8_t _ch) {
+	init(_scs, _sck, _sdio, _cko, _gio1, _gio2, _ch);
 }
 
 A7129::A7129() {
-	init(9, 8, 7, 6, 5, 4);
+	init(9, 8, 7, 6, 5, 4, 0);
 }
 
-void A7129::init(uint8_t _scs, uint8_t _sck, uint8_t _sdio, uint8_t _cko, uint8_t _gio1, uint8_t _gio2) {
+void A7129::init(uint8_t _scs, uint8_t _sck, uint8_t _sdio, uint8_t _cko, uint8_t _gio1, uint8_t _gio2, uint8_t _ch) {
 	A7129_SCS = _scs;
 	A7129_SCK = _sck;
 	A7129_SDIO = _sdio;
 	A7129_CKO = _cko;
 	A7129_GIO1 = _gio1;
 	A7129_GIO2 = _gio2;
+    A7129_CH = _ch;
 }
 
 /*********************************************************************
@@ -38,23 +39,22 @@ void A7129::begin(void) {
 }
 
 /*********************************************************************
-** A7129_POR
+** powerON
 *********************************************************************/
-void A7129::A7129_POR(void) {
+void A7129::powerON(void) {
 	//power on only
     delay(10);   			//for regulator settling time (power on only)
     StrobeCMD(CMD_RF_RST);  	//reset A7139 chip
     while(A7129_WriteID())		//check SPI
     {
 		StrobeCMD(CMD_RF_RST);  //reset A7139 chip
-		// Serial.print("?");   	
     }
     A7129_WritePageA(PM_PAGEA, A7129Config_PageA[PM_PAGEA] | 0x1000);   //STS=1
     delay(2);
     
-    entry_deep_sleep_mode();		//deep sleep
+    entryDeepSleepMode();		//deep sleep
     delay(2);
-    wake_up_from_deep_sleep_mode();	//wake up
+    wakeUpFromDeepSleepMode();	//wake up
     
     StrobeCMD(CMD_RF_RST);  	//reset A7139 chip
     while(A7129_WriteID())		//check SPI
@@ -66,9 +66,24 @@ void A7129::A7129_POR(void) {
 }
 
 /*********************************************************************
-** InitRF
+** switchChannel
 *********************************************************************/
-Uint8 A7129::InitRF(void) {
+uint8_t A7129::switchChannel(uint8_t ch) {
+    A7129_CH = ch;
+    if(A7129_Config())      //config A7129 chip
+        return 4;
+    delayMicroseconds(800);          //delay 800us for crystal stabilized
+
+    if(A7129_WriteID())     //write ID code
+        return 5;
+
+    return A7129_Cal();  //IF and VCO Calibration
+}
+
+/*********************************************************************
+** initRF
+*********************************************************************/
+Uint8 A7129::initRF(void) {
 	//initial pin
 	digitalWrite(A7129_SCS, HIGH);
 	digitalWrite(A7129_SCK, LOW);
@@ -82,15 +97,12 @@ Uint8 A7129::InitRF(void) {
     delay(1);
     
     if(A7129_Config())      //config A7129 chip
-        return 1;
+        return 4;
     delayMicroseconds(800);          //delay 800us for crystal stabilized
 
     if(A7129_WriteID())     //write ID code
-        return 1;
-    if(A7129_Cal())         //IF and VCO Calibration
-        return 1;
-
-    return 0;
+        return 5;
+    return A7129_Cal();  //IF and VCO Calibration
 }
 
 /*********************************************************************
@@ -102,6 +114,7 @@ Uint8 A7129::A7129_Config(void) {
 
     for(i=0; i<8; i++)
         A7129_WriteReg(i, A7129Config[i]);
+    A7129_WriteReg(PLL2_REG, PLL2_Chanels[A7129_CH]);
 
     for(i=10; i<16; i++)
         A7129_WriteReg(i, A7129Config[i]);
@@ -120,12 +133,23 @@ Uint8 A7129::A7129_Config(void) {
 }
 
 /*********************************************************************
-** wait_txrx_completed
+** waitTxRxCompleted
 *********************************************************************/
-void A7129::wait_txrx_completed(void) {
+bool A7129::waitTxRxCompleted(unsigned long _time_out) {
+    digitalWrite(A7129_GIO2, HIGH);
 	pinMode(A7129_GIO2, INPUT);
-	while(digitalRead(A7129_GIO2));
+    bool isTimeOut = true;
+    while(_time_out--) {
+        if(!digitalRead(A7129_GIO2)) {
+            isTimeOut = false;
+            break;
+        }
+       delayMicroseconds(4);
+    }
+    digitalWrite(A7129_GIO2, HIGH);
 	pinMode(A7129_GIO2, OUTPUT);
+
+    return isTimeOut;
 }
 
 /*********************************************************************
@@ -152,7 +176,6 @@ Uint8 A7129::A7129_Cal(void) {
     fbcf = (tmp>>4) & 0x01;
     if(fbcf)
     {
-    	Serial.println("fbcf calibration failed");
     	return 1;
     }
 
@@ -162,8 +185,7 @@ Uint8 A7129::A7129_Cal(void) {
     vccf = (tmp>>4) & 0x01;
     if(vccf)
     {
-    	Serial.println("vccf calibration failed");
-        return 1;
+        return 2;
     }
     
     
@@ -178,7 +200,7 @@ Uint8 A7129::A7129_Cal(void) {
 
     //VCO calibration procedure @STB state
     A7129_WriteReg(PLL1_REG, A7129Config[PLL1_REG]);
-    A7129_WriteReg(PLL2_REG, A7129Config[PLL2_REG]);
+    A7129_WriteReg(PLL2_REG, PLL2_Chanels[A7129_CH]);
     A7129_WriteReg(MODE_REG, A7129Config[MODE_REG] | 0x0004);       //VCO Band Calibration
     do{
         tmp = A7129_ReadReg(MODE_REG);
@@ -189,8 +211,7 @@ Uint8 A7129::A7129_Cal(void) {
     vb = (tmp >>5) & 0x07;
     vbcf = (tmp >>8) & 0x01;
     if(vbcf) {
-    	Serial.println("vbcf calibration failed");
-        return 1;
+        return 3;
     }
     
     return 0;   
@@ -434,9 +455,9 @@ Uint16 A7129::A7129_ReadPageB(Uint8 address) {
 
 
 /*********************************************************************
-** A7129_WriteFIFO
+** writeFIFO
 *********************************************************************/
-void A7129::A7129_WriteFIFO(uint8_t * data, uint8_t len) {
+void A7129::writeFIFO(uint8_t * data, uint8_t len) {
     Uint8 i, max_len = 64;
     if(len > max_len) { len = max_len; }
     StrobeCMD(CMD_TFR);     //TX FIFO address pointer reset
@@ -484,9 +505,9 @@ uint8_t A7129::RxPacket(char * out, uint8_t len) {
 
 
 /*********************************************************************
-** entry_deep_sleep_mode
+** entryDeepSleepMode
 *********************************************************************/
-void A7129::entry_deep_sleep_mode(void) {
+void A7129::entryDeepSleepMode(void) {
     StrobeCMD(CMD_RF_RST);              //RF reset
     A7129_WriteReg(PIN_REG, A7129Config[PIN_REG] | 0x0800);             //SCMDS=1
     A7129_WritePageA(PM_PAGEA, A7129Config_PageA[PM_PAGEA] | 0x0010);   //QDS=1
@@ -497,9 +518,9 @@ void A7129::entry_deep_sleep_mode(void) {
 }
 
 /*********************************************************************
-** wake_up_from_deep_sleep_mode
+** wakeUpFromDeepSleepMode
 *********************************************************************/
-void A7129::wake_up_from_deep_sleep_mode(void) {
+void A7129::wakeUpFromDeepSleepMode(void) {
     StrobeCMD(CMD_STBY);    //wake up
     delay(2);            //delay 2ms for VDD_D stabilized
 }
